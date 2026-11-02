@@ -311,6 +311,9 @@ impl CredSspClient {
         }
 
         ts_request.version = self.ts_request_version;
+        if ts_request.version >= 5 {
+            ts_request.client_nonce = Some(self.client_nonce);
+        }
 
         match self.state {
             CredSspState::NegoToken => {
@@ -1378,7 +1381,62 @@ fn construct_error(e: &Error) -> NStatusCode {
 mod tests {
     use static_assertions::assert_impl_one;
 
-    use super::CredSspClient;
+    use super::{
+        AuthIdentity, ClientMode, ClientState, CredSspClient, CredSspMode, Credentials, NtlmConfig, TsRequest,
+    };
+    use crate::{Secret, Username, generator::GeneratorState};
+
+    fn test_credentials() -> Credentials {
+        Credentials::AuthIdentity(AuthIdentity {
+            username: Username::parse("test_user").unwrap(),
+            password: Secret::from("test_password".to_owned()),
+        })
+    }
+
+    fn first_request(client: &mut CredSspClient) -> TsRequest {
+        let mut generator = client.process(TsRequest::default());
+        match generator.start() {
+            GeneratorState::Completed(Ok(ClientState::ReplyNeeded(request))) => request,
+            _ => panic!("NTLM negotiate should complete without network I/O"),
+        }
+    }
+
+    #[test]
+    fn first_ntlm_request_includes_internal_client_nonce() {
+        let mut client = CredSspClient::new(
+            Vec::new(),
+            test_credentials(),
+            CredSspMode::WithCredentials,
+            ClientMode::Ntlm(NtlmConfig::default()),
+            "test".to_owned(),
+        )
+        .unwrap();
+        let request = first_request(&mut client);
+
+        assert_eq!(request.version, 6);
+        assert_eq!(request.client_nonce, Some(client.client_nonce));
+        assert_eq!(request.nego_tokens.as_ref().map(Vec::len), Some(40));
+        assert_eq!(request.buffer_len(), 93);
+        assert!(request.pub_key_auth.is_none());
+        assert!(request.auth_info.is_none());
+    }
+
+    #[test]
+    fn older_ts_request_version_does_not_add_client_nonce() {
+        let mut client = CredSspClient::new_with_version(
+            Vec::new(),
+            test_credentials(),
+            CredSspMode::WithCredentials,
+            4,
+            ClientMode::Ntlm(NtlmConfig::default()),
+            "test".to_owned(),
+        )
+        .unwrap();
+        let request = first_request(&mut client);
+
+        assert_eq!(request.version, 4);
+        assert!(request.client_nonce.is_none());
+    }
 
     #[test]
     fn cred_sspi_client_is_send() {
